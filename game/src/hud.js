@@ -1,365 +1,416 @@
-// The vector HUD, drawn on a 2D canvas over the WebGL canvas: score and time, speed
-// and altitude tapes, a compass, a pitch ladder, a simple ILS for Runway 09 with PAPI
-// lights, a minimap, and a throttle/gear/flaps status bar. Angles here are the flight
-// model's degrees: heading 0 is north, 90 is east, pitch positive is nose up.
+// Vector HUD for Caldera Meridian, drawn on a 2D canvas over the WebGL view.
+//
+// The layout is the 1280x480 design: score panel top-left, speed tape left,
+// altitude tape right, heading compass top-centre, pitch ladder in the
+// middle, ILS panel near the runway, minimap bottom-right, and a status bar
+// along the bottom. All text is bold monospace with a dark outline; panels
+// are dark translucent with a thin cyan border.
 
 import { runwayState } from './runway.js';
 
-const HUD_W = 1280;
-const HUD_H = 480;
-const INK = '#f2f8ff';
-const CYAN = '#29e6ff';
-const GREEN = '#7dff9e';
-const AMBER = '#ffd27a';
-const RED = '#ff4136';
-const PANEL = 'rgba(5,9,16,0.62)';
-const SEA = 'rgba(29,78,95,0.6)';
-const SAND = 'rgba(232,200,138,0.55)';
+const W = 1280;
+const H = 480;
+
+const INK = '#eef4fb';
+const CYAN = '#2ee6ff';
+const GREEN = '#37e08a';
+const AMBER = '#ffc44d';
+const RED = '#ff3b30';
+const DIM = '#9fb2c8';
+const PANEL_FILL = 'rgba(6, 12, 22, 0.62)';
+const PANEL_EDGE = 'rgba(46, 230, 255, 0.45)';
+const OUTLINE = 'rgba(2, 6, 12, 0.85)';
+const SEA = '#12303f';
+const SAND = '#c8a86a';
+
+const DEG = Math.PI / 180;
+
+function clamp(value, min, max) {
+  return value < min ? min : value > max ? max : value;
+}
+
+function wrapDeg(degrees) {
+  return ((degrees + 180) % 360 + 360) % 360 - 180;
+}
+
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+function pad3(n) {
+  return String(n).padStart(3, '0');
+}
+
+function formatClock(seconds) {
+  const total = Math.max(0, Math.floor(seconds || 0));
+  return `${pad2(Math.floor(total / 60))}:${pad2(total % 60)}`;
+}
 
 export function createHUD(canvas) {
   const ctx = canvas.getContext('2d');
-  const cache = { terrain: null, coast: null };
-  return { draw(state) { drawFrame(ctx, state, cache); } };
-}
+  // One cached minimap base image per terrain object.
+  const mapCache = new WeakMap();
 
-function drawFrame(ctx, state, cache) {
-  const s = Math.min(ctx.canvas.width / HUD_W, ctx.canvas.height / HUD_H);
-  ctx.setTransform(s, 0, 0, s, 0, 0);
-  ctx.clearRect(0, 0, HUD_W, HUD_H);
-  ctx.lineJoin = 'round';
-  ctx.lineCap = 'round';
-  if ((state.screen || 'play') === 'title') return;
-  const f = state.flight || { pos: { x: 0, y: 0, z: 0 }, heading: 0, pitch: 0, roll: 0, speed: 0, verticalSpeed: 0, throttle: 0, flaps: 0, gear: 0, stalled: false };
-  const world = state.world || {};
-  drawScorePanel(ctx, world);
-  drawTape(ctx, 12, f.speed, 'SPD M/S', 60, 5, 10);
-  drawTape(ctx, HUD_W - 90, f.pos.y, 'ALT M', 300, 20, 50);
-  drawStallMark(ctx, f);
-  drawCompass(ctx, f);
-  drawPitchLadder(ctx, f);
-  drawILS(ctx, f, world);
-  drawMinimap(ctx, world, f, cache);
-  drawStatusPanel(ctx, f, state);
-  drawCenterMessage(ctx, state, world);
-  if (f.stalled && Math.floor((state.time || 0) * 3) % 2 === 0) drawText(ctx, 'STALL', 640, 96, 30, RED, 'center', 5);
-}
-
-function drawText(ctx, text, x, y, size, color, align, stroke) {
-  ctx.font = 'bold ' + size + 'px monospace';
-  ctx.textAlign = align || 'left';
-  ctx.lineWidth = stroke || 3;
-  ctx.strokeStyle = 'rgba(2,6,10,0.9)';
-  ctx.strokeText(text, x, y);
-  ctx.fillStyle = color;
-  ctx.fillText(text, x, y);
-}
-
-function panel(ctx, x, y, w, h) {
-  ctx.fillStyle = PANEL;
-  ctx.fillRect(x, y, w, h);
-  ctx.strokeStyle = 'rgba(41,230,255,0.45)';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
-}
-
-function clamp(v, a, b) {
-  return Math.min(b, Math.max(a, v));
-}
-
-function formatTime(t) {
-  const s = Math.max(0, Math.floor(t || 0));
-  return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
-}
-
-function headingDegrees(f) {
-  const h = Number(f.heading) || 0;
-  return ((h % 360) + 360) % 360;
-}
-
-function drawScorePanel(ctx, world) {
-  panel(ctx, 12, 10, 246, 96);
-  drawText(ctx, 'SKOR ' + String(Math.round(world.score || 0)).padStart(6, '0'), 24, 38, 20, INK);
-  drawText(ctx, formatTime(world.time), 246, 38, 18, INK, 'right');
-  drawText(ctx, 'KOMBO x' + (world.combo || 0), 24, 62, 15, (world.combo || 0) > 1 ? AMBER : INK, 'left', 2);
-  drawText(ctx, 'RING ' + (world.ringsPassed || 0) + '/11', 24, 86, 15, CYAN, 'left', 2);
-}
-
-function drawTape(ctx, x, value, name, span, tick, labelStep) {
-  value = Number(value) || 0;
-  const w = 78;
-  const y = 118;
-  const h = 170;
-  const px = h / span;
-  const lo = value - span / 2;
-  panel(ctx, x, y, w, h);
-  drawText(ctx, name, x + w / 2, y - 8, 14, INK, 'center', 2);
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(x + 2, y + 2, w - 4, h - 4);
-  ctx.clip();
-  ctx.lineWidth = 2;
-  for (let v = Math.ceil(lo / tick) * tick; v <= lo + span; v += tick) {
-    const yy = y + h - (v - lo) * px;
-    if (yy < y + 6 || yy > y + h - 6) continue;
-    ctx.strokeStyle = 'rgba(242,248,255,0.75)';
-    ctx.beginPath();
-    ctx.moveTo(x + w - 12, yy);
-    ctx.lineTo(x + w - 3, yy);
-    ctx.stroke();
-    if (v % labelStep === 0) drawText(ctx, String(v), x + w - 16, yy + 5, 13, INK, 'right', 2);
+  function text(str, x, y, size, color, align = 'left') {
+    ctx.font = `bold ${size}px monospace`;
+    ctx.textAlign = align;
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = Math.max(2, Math.round(size / 7));
+    ctx.strokeStyle = OUTLINE;
+    ctx.strokeText(str, x, y);
+    ctx.fillStyle = color;
+    ctx.fillText(str, x, y);
   }
-  ctx.restore();
-  ctx.fillStyle = PANEL;
-  ctx.fillRect(x + 4, y + h / 2 - 18, w - 8, 36);
-  ctx.strokeStyle = CYAN;
-  ctx.strokeRect(x + 4, y + h / 2 - 18, w - 8, 36);
-  drawText(ctx, String(Math.round(value)), x + w / 2, y + h / 2 + 8, 22, CYAN, 'center');
-}
 
-function drawStallMark(ctx, f) {
-  const yy = 288 - (28 - ((Number(f.speed) || 0) - 30)) * (170 / 60);
-  if (yy < 120 || yy > 286) return;
-  ctx.strokeStyle = RED;
-  ctx.lineWidth = 2;
-  ctx.setLineDash([5, 4]);
-  ctx.beginPath();
-  ctx.moveTo(15, yy);
-  ctx.lineTo(87, yy);
-  ctx.stroke();
-  ctx.setLineDash([]);
-}
-
-function drawCompass(ctx, f) {
-  const cx = 640;
-  const y = 12;
-  const w = 430;
-  const h = 40;
-  const hdg = headingDegrees(f);
-  panel(ctx, cx - w / 2, y, w, h);
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(cx - w / 2 + 2, y + 2, w - 4, h - 4);
-  ctx.clip();
-  const names = { 0: 'N', 90: 'E', 180: 'S', 270: 'W' };
-  for (let a = Math.ceil((hdg - 45) / 5) * 5; a <= hdg + 45; a += 5) {
-    const xx = cx + (a - hdg) * ((w - 10) / 90);
-    const norm = ((a % 360) + 360) % 360;
-    const big = norm % 30 === 0;
-    ctx.strokeStyle = 'rgba(242,248,255,0.85)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(xx, y + h - 4);
-    ctx.lineTo(xx, y + h - (big ? 16 : 9));
-    ctx.stroke();
-    if (big) drawText(ctx, names[norm] || String(Math.round(norm / 10)).padStart(2, '0'), xx, y + h - 20, 13, INK, 'center', 2);
+  function panel(x, y, w, h) {
+    ctx.fillStyle = PANEL_FILL;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = PANEL_EDGE;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
   }
-  ctx.restore();
-  ctx.fillStyle = AMBER;
-  ctx.beginPath();
-  ctx.moveTo(cx - 6, y);
-  ctx.lineTo(cx + 6, y);
-  ctx.lineTo(cx, y + 7);
-  ctx.closePath();
-  ctx.fill();
-  drawText(ctx, 'HDG ' + String(Math.round(hdg)).padStart(3, '0'), cx, y + h + 18, 15, AMBER, 'center');
-}
 
-function drawPitchLadder(ctx, f) {
-  const cx = 640;
-  const cy = 250;
-  const px = 5.5;
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(cx - 250, cy - 140, 500, 290);
-  ctx.clip();
-  ctx.translate(cx, cy);
-  ctx.rotate(-(f.roll || 0) * Math.PI / 180);
-  ctx.translate(0, (f.pitch || 0) * px);
-  ctx.strokeStyle = 'rgba(242,248,255,0.95)';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.moveTo(-170, 0);
-  ctx.lineTo(-40, 0);
-  ctx.moveTo(40, 0);
-  ctx.lineTo(170, 0);
-  ctx.stroke();
-  for (let a = -40; a <= 40; a += 10) {
-    if (a === 0) continue;
-    const yy = -a * px;
-    const up = a > 0;
-    ctx.setLineDash(up ? [] : [9, 7]);
-    ctx.strokeStyle = up ? 'rgba(242,248,255,0.9)' : 'rgba(255,210,122,0.9)';
-    ctx.lineWidth = 2;
+  function diamond(cx, cy, r, color) {
+    ctx.fillStyle = color;
     ctx.beginPath();
-    ctx.moveTo(-85, yy);
-    ctx.lineTo(-30, yy);
-    ctx.moveTo(30, yy);
-    ctx.lineTo(85, yy);
-    ctx.stroke();
+    ctx.moveTo(cx, cy - r);
+    ctx.lineTo(cx + r, cy);
+    ctx.lineTo(cx, cy + r);
+    ctx.lineTo(cx - r, cy);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawScore(world, time) {
+    panel(12, 10, 212, 88);
+    text(`SKOR ${String(world.score || 0).padStart(6, '0')}`, 24, 36, 19, INK);
+    text(formatClock(time), 212, 36, 19, INK, 'right');
+    const combo = world.combo || 0;
+    text(`KOMBO x${combo}`, 24, 60, 16, combo > 1 ? AMBER : INK);
+    const total = world.rings ? world.rings.length : 11;
+    text(`RING ${world.ringsPassed || 0}/${total}`, 24, 84, 16, CYAN);
+  }
+
+  // A vertical tape: ticks every tickStep, numbers every labelStep, the
+  // current value in a box in the middle. An optional marker draws a dashed
+  // line at one value (the stall speed on the speed tape).
+  function drawTape(x, value, opts) {
+    const top = 118;
+    const height = 216;
+    const centerY = top + height / 2;
+    const pxPerUnit = height / (opts.windowHalf * 2);
+    panel(x, top, 66, height);
+    text(opts.label, x + 33, top - 10, 11, DIM, 'center');
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x, top, 66, height);
+    ctx.clip();
+    const first = Math.ceil((value - opts.windowHalf) / opts.tickStep) * opts.tickStep;
+    for (let v = first; v <= value + opts.windowHalf; v += opts.tickStep) {
+      const y = centerY - (v - value) * pxPerUnit;
+      if (y < top + 4 || y > top + height - 4) continue;
+      const isLabel = Math.round(v) % opts.labelStep === 0;
+      ctx.strokeStyle = isLabel ? INK : DIM;
+      ctx.lineWidth = isLabel ? 2 : 1;
+      ctx.beginPath();
+      ctx.moveTo(x + 6, y);
+      ctx.lineTo(x + (isLabel ? 20 : 14), y);
+      ctx.stroke();
+      if (isLabel) text(String(Math.round(v)), x + 26, y, 12, INK);
+    }
+    if (opts.marker !== undefined) {
+      const my = centerY - (opts.marker - value) * pxPerUnit;
+      if (my >= top && my <= top + height) {
+        ctx.setLineDash([5, 4]);
+        ctx.strokeStyle = RED;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(x, my);
+        ctx.lineTo(x + 66, my);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+    ctx.restore();
+    // Current value box, centred on the tape.
+    ctx.fillStyle = 'rgba(4, 10, 18, 0.85)';
+    ctx.fillRect(x - 4, centerY - 16, 74, 32);
+    ctx.strokeStyle = CYAN;
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x - 3.5, centerY - 15.5, 73, 31);
+    text(String(Math.round(value)), x + 33, centerY + 1, 20, CYAN, 'center');
+  }
+
+  function drawCompass(heading) {
+    const x0 = 425;
+    const w = 430;
+    const y = 12;
+    const h = 34;
+    const centerX = 640;
+    const pxPerDeg = w / 80;
+    panel(x0, y, w, h);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x0, y, w, h);
+    ctx.clip();
+    const first = Math.floor((heading - 40) / 5) * 5;
+    for (let hd = first; hd <= heading + 40; hd += 5) {
+      const d = wrapDeg(hd - heading);
+      if (Math.abs(d) > 40) continue;
+      const x = centerX + d * pxPerDeg;
+      const norm = ((hd % 360) + 360) % 360;
+      const isCardinal = norm % 90 === 0;
+      const isThirty = norm % 30 === 0;
+      const len = isCardinal || isThirty ? 14 : norm % 15 === 0 ? 10 : 6;
+      ctx.strokeStyle = isCardinal || isThirty ? INK : DIM;
+      ctx.lineWidth = isCardinal || isThirty ? 2 : 1;
+      ctx.beginPath();
+      ctx.moveTo(x, y + h - 4);
+      ctx.lineTo(x, y + h - 4 - len);
+      ctx.stroke();
+      if (isCardinal || isThirty) {
+        const label =
+          norm === 0 ? 'N' : norm === 90 ? 'E' : norm === 180 ? 'S' : norm === 270 ? 'W' : pad2(norm / 10);
+        text(label, x, y + 10, 12, isCardinal ? AMBER : INK, 'center');
+      }
+    }
+    ctx.restore();
+    ctx.fillStyle = AMBER;
+    ctx.beginPath();
+    ctx.moveTo(centerX - 8, y - 2);
+    ctx.lineTo(centerX + 8, y - 2);
+    ctx.lineTo(centerX, y + 9);
+    ctx.closePath();
+    ctx.fill();
+    const hdg = Math.round(((heading % 360) + 360) % 360);
+    text(`HDG ${pad3(hdg)}`, centerX, y + h + 12, 15, AMBER, 'center');
+  }
+
+  function drawLadder(pitch, roll) {
+    const cx = 640;
+    const cy = 240;
+    const pxPerDeg = 2.4;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(-roll * DEG);
+    const rungs = [-40, -30, -20, -10, 0, 10, 20, 30, 40];
+    for (const deg of rungs) {
+      const y = (pitch - deg) * pxPerDeg;
+      if (Math.abs(y) > 210) continue;
+      const isHorizon = deg === 0;
+      const width = isHorizon ? 170 : 85;
+      ctx.strokeStyle = deg >= 0 ? INK : AMBER;
+      ctx.lineWidth = isHorizon ? 2.5 : 2;
+      ctx.setLineDash(deg < 0 ? [7, 6] : []);
+      ctx.beginPath();
+      ctx.moveTo(-width / 2, y);
+      ctx.lineTo(width / 2, y);
+      ctx.stroke();
+      if (deg === 20 || deg === -20 || deg === 40 || deg === -40) {
+        ctx.setLineDash([]);
+        const labelColor = deg > 0 ? INK : AMBER;
+        text(String(Math.abs(deg)), -width / 2 - 8, y, 12, labelColor, 'right');
+        text(String(Math.abs(deg)), width / 2 + 8, y, 12, labelColor, 'left');
+      }
+    }
+    ctx.restore();
     ctx.setLineDash([]);
-    if (Math.abs(a) % 20 === 0) drawText(ctx, String(Math.abs(a)), -92, yy + 5, 13, up ? INK : AMBER, 'right', 2);
+    // Fixed aircraft symbol at the centre: two wings and a cyan dot.
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(624, 240);
+    ctx.lineTo(636, 240);
+    ctx.moveTo(644, 240);
+    ctx.lineTo(656, 240);
+    ctx.stroke();
+    ctx.fillStyle = CYAN;
+    ctx.beginPath();
+    ctx.arc(640, 240, 3, 0, Math.PI * 2);
+    ctx.fill();
   }
-  ctx.restore();
-  ctx.strokeStyle = CYAN;
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.moveTo(cx - 46, cy);
-  ctx.lineTo(cx - 14, cy);
-  ctx.lineTo(cx - 14, cy + 8);
-  ctx.moveTo(cx + 46, cy);
-  ctx.lineTo(cx + 14, cy);
-  ctx.lineTo(cx + 14, cy + 8);
-  ctx.stroke();
-  ctx.fillStyle = CYAN;
-  ctx.beginPath();
-  ctx.arc(cx, cy, 3, 0, Math.PI * 2);
-  ctx.fill();
-}
 
-function drawILS(ctx, f, world) {
-  if (!world.runway) return;
-  const ils = runwayState(f, world.runway);
-  if (!ils) return;
-  const dist = ils.distanceToThreshold;
-  if (dist === null || dist === undefined || dist > 5200) return;
-  const off = ils.centerOffset || 0;
-  const dev = ils.glideDeviation || 0;
-  const cx = 640;
-  const top = 306;
-  panel(ctx, cx - 82, top, 164, 80);
-  drawText(ctx, 'ILS 09', cx - 74, top + 20, 14, GREEN, 'left', 2);
-  drawText(ctx, (dist / 1000).toFixed(1) + 'KM', cx + 74, top + 20, 14, INK, 'right', 2);
-  ctx.strokeStyle = 'rgba(125,255,158,0.9)';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(cx - 66, top + 42);
-  ctx.lineTo(cx + 66, top + 42);
-  ctx.moveTo(cx, top + 26);
-  ctx.lineTo(cx, top + 62);
-  ctx.stroke();
-  drawDiamond(ctx, cx + clamp(off / 60, -1, 1) * 60, top + 42);
-  drawDiamond(ctx, cx, top + 42 + clamp(dev / 1.4, -1, 1) * 20);
-  if (Array.isArray(ils.papiLights)) {
-    for (let i = 0; i < 4 && i < ils.papiLights.length; i++) {
+  function drawILS(flight, world) {
+    if (!world.runway) return;
+    const ils = runwayState(flight, world.runway);
+    if (!ils || ils.distToThreshold > 5200) return;
+    const x = 12;
+    const y = 342;
+    const w = 176;
+    const h = 98;
+    panel(x, y, w, h);
+    text('ILS 09', x + 12, y + 16, 15, INK);
+    text(`${(ils.distToThreshold / 1000).toFixed(1)} KM`, x + w - 12, y + 16, 15, CYAN, 'right');
+    const ccx = x + 58;
+    const ccy = y + 56;
+    ctx.strokeStyle = GREEN;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(ccx - 26, ccy);
+    ctx.lineTo(ccx + 26, ccy);
+    ctx.moveTo(ccx, ccy - 24);
+    ctx.lineTo(ccx, ccy + 24);
+    ctx.stroke();
+    // Localizer diamond slides with the centre offset, glideslope diamond
+    // with the glide deviation.
+    const dx = clamp(ils.centerOffset / 15, -1, 1) * 22;
+    const dy = clamp(ils.glideDeviation / 3, -1, 1) * 20;
+    diamond(ccx + dx, ccy, 5, GREEN);
+    diamond(ccx, ccy + dy, 5, GREEN);
+    text('PAPI', x + 12, y + h - 16, 10, DIM);
+    for (let i = 0; i < 4; i++) {
       ctx.fillStyle = ils.papiLights[i] ? '#ffffff' : RED;
       ctx.beginPath();
-      ctx.arc(cx - 24 + i * 16, top + 72, 5, 0, Math.PI * 2);
+      ctx.arc(x + w - 14 - (3 - i) * 13, y + h - 16, 4.5, 0, Math.PI * 2);
       ctx.fill();
     }
   }
-}
 
-function drawDiamond(ctx, x, y) {
-  ctx.fillStyle = GREEN;
-  ctx.strokeStyle = 'rgba(2,6,10,0.9)';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(x, y - 7);
-  ctx.lineTo(x + 7, y);
-  ctx.lineTo(x, y + 7);
-  ctx.lineTo(x - 7, y);
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-}
-
-function drawMinimap(ctx, world, f, cache) {
-  const size = 170;
-  const x = HUD_W - 14 - size;
-  const y = HUD_H - 14 - size;
-  panel(ctx, x, y, size, size);
-  ctx.fillStyle = SEA;
-  ctx.fillRect(x + 2, y + 2, size - 4, size - 4);
-  const t = world.terrain;
-  if (t && typeof t.heightAt === 'function') {
-    if (cache.terrain !== t) {
-      cache.terrain = t;
-      cache.coast = buildCoastGrid(t);
+  function drawMinimap(flight, world) {
+    const x = 1098;
+    const y = 298;
+    const size = 170;
+    const scale = size / 4000;
+    const mapX = (wx) => x + (wx + 2000) * scale;
+    const mapY = (wz) => y + (wz + 2000) * scale;
+    const terrain = world.terrain;
+    let base = terrain ? mapCache.get(terrain) : null;
+    if (terrain && !base) {
+      base = document.createElement('canvas');
+      base.width = size;
+      base.height = size;
+      const bctx = base.getContext('2d');
+      bctx.fillStyle = SEA;
+      bctx.fillRect(0, 0, size, size);
+      const cells = 40;
+      const step = size / cells;
+      bctx.fillStyle = SAND;
+      for (let gz = 0; gz < cells; gz++) {
+        for (let gx = 0; gx < cells; gx++) {
+          const wx = -2000 + (gx + 0.5) * (4000 / cells);
+          const wz = -2000 + (gz + 0.5) * (4000 / cells);
+          if (terrain.heightAt(wx, wz) > 0.5) {
+            bctx.fillRect(gx * step, gz * step, step + 0.5, step + 0.5);
+          }
+        }
+      }
+      mapCache.set(terrain, base);
     }
-    const n = cache.coast.length;
-    const cell = (size - 4) / n;
-    for (let i = 0; i < n; i++) {
-      for (let j = 0; j < n; j++) {
-        ctx.fillStyle = cache.coast[i][j] ? SAND : SEA;
-        ctx.fillRect(x + 2 + i * cell, y + 2 + j * cell, cell + 0.6, cell + 0.6);
+    if (base) {
+      ctx.drawImage(base, x, y);
+    } else {
+      ctx.fillStyle = SEA;
+      ctx.fillRect(x, y, size, size);
+    }
+    ctx.strokeStyle = CYAN;
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x + 0.5, y + 0.5, size - 1, size - 1);
+    // Runway strip with its 09 label.
+    if (world.runway) {
+      const rwy = world.runway;
+      ctx.strokeStyle = '#f5f2e8';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(mapX(rwy.threshold.x), mapY(rwy.threshold.z));
+      ctx.lineTo(mapX(rwy.end.x), mapY(rwy.end.z));
+      ctx.stroke();
+      text('09', mapX(rwy.threshold.x) - 4, mapY(rwy.threshold.z) - 9, 10, INK, 'right');
+    }
+    // Rings: cyan dots, the next one amber with a circle.
+    const rings = world.rings || [];
+    const next = world.ringsPassed || 0;
+    for (let i = 0; i < rings.length; i++) {
+      const px = mapX(rings[i].x);
+      const py = mapY(rings[i].z);
+      if (i === next) {
+        ctx.fillStyle = AMBER;
+        ctx.beginPath();
+        ctx.arc(px, py, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = AMBER;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(px, py, 7, 0, Math.PI * 2);
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = CYAN;
+        ctx.beginPath();
+        ctx.arc(px, py, 3, 0, Math.PI * 2);
+        ctx.fill();
       }
     }
-  }
-  const toX = (wx) => x + 2 + ((wx + 2000) / 4000) * (size - 4);
-  const toY = (wz) => y + 2 + ((wz + 2000) / 4000) * (size - 4);
-  const r0 = toX(1200);
-  const r1 = toX(1800);
-  const rz = toY(-15);
-  ctx.fillStyle = INK;
-  ctx.fillRect(r0, rz, r1 - r0, Math.max(3, toY(15) - rz));
-  drawText(ctx, '09', (r0 + r1) / 2, rz - 4, 13, INK, 'center', 2);
-  const rings = world.rings || [];
-  for (let i = 0; i < rings.length; i++) {
-    const px = toX(rings[i].x);
-    const py = toY(rings[i].z);
-    const next = i === (world.ringsPassed || 0);
-    ctx.fillStyle = next ? AMBER : CYAN;
-    ctx.beginPath();
-    ctx.arc(px, py, next ? 5 : 3, 0, Math.PI * 2);
-    ctx.fill();
-    if (next) {
-      ctx.strokeStyle = AMBER;
-      ctx.lineWidth = 2;
+    // Aircraft arrow, rotated by heading (0 faces north, up on the map).
+    if (flight.pos) {
+      ctx.save();
+      ctx.translate(mapX(flight.pos.x), mapY(flight.pos.z));
+      ctx.rotate((flight.heading || 0) * DEG);
+      ctx.fillStyle = AMBER;
       ctx.beginPath();
-      ctx.arc(px, py, 8, 0, Math.PI * 2);
-      ctx.stroke();
+      ctx.moveTo(0, -8);
+      ctx.lineTo(-5, 6);
+      ctx.lineTo(5, 6);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
     }
   }
-  ctx.save();
-  ctx.translate(toX(f.pos.x), toY(f.pos.z));
-  ctx.rotate((f.heading || 0) * Math.PI / 180 - Math.PI / 2);
-  ctx.fillStyle = AMBER;
-  ctx.strokeStyle = 'rgba(2,6,10,0.9)';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(9, 0);
-  ctx.lineTo(-6, 6);
-  ctx.lineTo(-3, 0);
-  ctx.lineTo(-6, -6);
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-  ctx.restore();
-}
 
-function buildCoastGrid(terrain) {
-  const n = 40;
-  const rows = [];
-  for (let i = 0; i < n; i++) {
-    const row = [];
-    for (let j = 0; j < n; j++) {
-      row.push(terrain.heightAt(-2000 + ((i + 0.5) * 4000) / n, -2000 + ((j + 0.5) * 4000) / n) > 0.5);
-    }
-    rows.push(row);
+  function drawStatusBar(flight, camera) {
+    const y = 464;
+    const vs = flight.verticalSpeed || 0;
+    text(`VS ${vs >= 0 ? '+' : ''}${vs.toFixed(1)}`, 12, y, 16, INK);
+    text('THR', 118, y, 16, INK);
+    const bx = 162;
+    const bw = 92;
+    const bh = 13;
+    ctx.fillStyle = 'rgba(6, 12, 22, 0.62)';
+    ctx.fillRect(bx, y - bh / 2, bw, bh);
+    ctx.strokeStyle = PANEL_EDGE;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx + 0.5, y - bh / 2 + 0.5, bw - 1, bh - 1);
+    ctx.fillStyle = CYAN;
+    ctx.fillRect(bx + 1, y - bh / 2 + 1, (bw - 2) * clamp(flight.throttle || 0, 0, 1), bh - 2);
+    text(`${pad3(Math.round((flight.throttle || 0) * 100))}%`, bx + bw + 10, y, 16, CYAN);
+    text(flight.gear ? 'GEAR DOWN' : 'GEAR UP', 348, y, 16, flight.gear ? GREEN : INK);
+    text(flight.flaps ? 'FLAPS DOWN' : 'FLAPS UP', 478, y, 16, flight.flaps ? GREEN : INK);
+    text(camera === 'cockpit' ? 'CAM COCKPIT' : 'CAM CHASE', 620, y, 16, INK);
   }
-  return rows;
-}
 
-function drawStatusPanel(ctx, f, state) {
-  const y = 470;
-  drawText(ctx, 'VS ' + (f.verticalSpeed >= 0 ? '+' : '') + (f.verticalSpeed || 0).toFixed(1), 14, 356, 14, INK, 'left', 2);
-  drawText(ctx, 'THR', 14, y, 14, INK, 'left', 2);
-  ctx.fillStyle = 'rgba(242,248,255,0.22)';
-  ctx.fillRect(52, y - 13, 110, 15);
-  ctx.fillStyle = CYAN;
-  ctx.fillRect(52, y - 13, 110 * clamp(f.throttle, 0, 1), 15);
-  ctx.strokeStyle = 'rgba(242,248,255,0.7)';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(52, y - 13, 110, 15);
-  drawText(ctx, String(Math.round(clamp(f.throttle, 0, 1) * 100)).padStart(3, '0') + '%', 172, y, 14, INK, 'left', 2);
-  drawText(ctx, 'GEAR ' + (f.gear > 0.5 ? 'DOWN' : 'UP'), 240, y, 14, f.gear > 0.5 ? GREEN : INK, 'left', 2);
-  drawText(ctx, 'FLAPS ' + (f.flaps > 0.5 ? 'DOWN' : 'UP'), 360, y, 14, f.flaps > 0.5 ? AMBER : INK, 'left', 2);
-  drawText(ctx, 'CAM ' + (state.camera === 'cockpit' ? 'COCKPIT' : 'CHASE'), 500, y, 14, INK, 'left', 2);
-}
+  function draw(state) {
+    const s = Math.min(canvas.width / W, canvas.height / H);
+    ctx.setTransform(s, 0, 0, s, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    if (!state || state.screen === 'title') return;
+    const flight = state.flight || {};
+    const world = state.world || {};
+    const time = state.time ?? world.time ?? 0;
 
-function drawCenterMessage(ctx, state, world) {
-  const msg = state.message || world.message;
-  if (!msg) return;
-  ctx.globalAlpha = 1;
-  drawText(ctx, String(msg), 640, 138, 26, AMBER, 'center');
+    drawScore(world, time);
+    drawTape(12, flight.speed || 0, {
+      label: 'SPD M/S',
+      windowHalf: 30,
+      tickStep: 10,
+      labelStep: 10,
+      marker: flight.flaps ? 22 : 28,
+    });
+    drawTape(1202, flight.pos ? flight.pos.y : 0, {
+      label: 'ALT M',
+      windowHalf: 150,
+      tickStep: 50,
+      labelStep: 100,
+    });
+    drawCompass(flight.heading || 0);
+    drawLadder(flight.pitch || 0, flight.roll || 0);
+    drawILS(flight, world);
+    drawMinimap(flight, world);
+    drawStatusBar(flight, state.camera || 'chase');
+
+    const message = state.message || world.message;
+    if (message) text(message, 640, 140, 26, AMBER, 'center');
+    if (flight.stalled && Math.floor(time * 3) % 2 === 0) {
+      text('STALL', 640, 205, 30, RED, 'center');
+    }
+  }
+
+  return { draw };
 }
